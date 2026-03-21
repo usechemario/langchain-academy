@@ -48,6 +48,10 @@ htmlcov/
 .coverage.*
 .cache
 nosetests.xml
+
+#langegraph check points
+*.pckl
+
 coverage.xml
 *.cover
 *.py,cover
