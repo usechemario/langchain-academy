@@ -3,17 +3,21 @@ from pydantic import BaseModel, Field
 from typing import Annotated, List
 from typing_extensions import TypedDict
 
+import os
+
 from langchain_community.document_loaders import WikipediaLoader
+from langchain_community.chat_models import ChatOllama
 from langchain_tavily import TavilySearch  # updated 1.0
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, get_buffer_string
-from langchain_openai import ChatOpenAI
 
 from langgraph.constants import Send
 from langgraph.graph import END, MessagesState, START, StateGraph
 
 ### LLM
 
-llm = ChatOpenAI(model="gpt-4o", temperature=0) 
+ollama_model = os.getenv("OLLAMA_MODEL", "qwen3.5:0.8b")
+ollama_url = os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434")
+llm = ChatOllama(model=ollama_model, base_url=ollama_url, temperature=0)
 
 ### Schema 
 
@@ -84,26 +88,46 @@ analyst_instructions="""You are tasked with creating a set of AI analyst persona
 5. Assign one analyst to each theme."""
 
 def create_analysts(state: GenerateAnalystsState):
-    
     """ Create analysts """
-    
-    topic=state['topic']
-    max_analysts=state['max_analysts']
-    human_analyst_feedback=state.get('human_analyst_feedback', '')
-        
-    # Enforce structured output
-    structured_llm = llm.with_structured_output(Perspectives)
 
-    # System message
-    system_message = analyst_instructions.format(topic=topic,
-                                                            human_analyst_feedback=human_analyst_feedback, 
-                                                            max_analysts=max_analysts)
+    topic = state['topic']
+    max_analysts = state['max_analysts']
+    human_analyst_feedback = state.get('human_analyst_feedback', '')
 
-    # Generate question 
-    analysts = structured_llm.invoke([SystemMessage(content=system_message)]+[HumanMessage(content="Generate the set of analysts.")])
-    
-    # Write the list of analysis to state
-    return {"analysts": analysts.analysts}
+    # System message (force JSON output)
+    system_message = analyst_instructions.format(
+        topic=topic,
+        human_analyst_feedback=human_analyst_feedback,
+        max_analysts=max_analysts,
+    ) + "\n\nRespond in valid JSON in this exact format: {\"analysts\":[{\"affiliation\":...,\"name\":...,\"role\":...,\"description\":...}]}"
+
+    response = llm.invoke(
+        [SystemMessage(content=system_message), HumanMessage(content="Generate the set of analysts.")]
+    )
+
+    raw_text = (response.content or "").strip()
+    if not raw_text:
+        raise ValueError("create_analysts: llm returned empty response")
+
+    if raw_text.startswith("```") and raw_text.endswith("```"):
+        raw_text = raw_text.strip("`").strip()
+
+    # Attempt to isolate the JSON object between first '{' and last '}'
+    json_start = raw_text.find("{")
+    json_end = raw_text.rfind("}")
+    if json_start != -1 and json_end != -1 and json_end >= json_start:
+        parse_text = raw_text[json_start : json_end + 1]
+    else:
+        parse_text = raw_text
+
+    try:
+        parsed = Perspectives.parse_raw(parse_text)
+    except Exception as exc:
+        raise ValueError(
+            f"create_analysts parse failed. raw_text={raw_text!r}, parse_text={parse_text!r}"
+        ) from exc
+
+    return {"analysts": parsed.analysts}
 
 def human_feedback(state: GenerateAnalystsState):
     """ No-op node that should be interrupted on """
